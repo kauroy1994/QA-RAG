@@ -102,7 +102,7 @@ class LLM(object):
                     }
                     ],
                     temperature = 0.0,
-                    model="llama3-70b-8192",
+                    model="mixtral-8x7b-32768",
                     )
 
         llm_response_string = str(chat_completion.choices[0].message.content)

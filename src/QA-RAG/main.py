@@ -19,6 +19,24 @@ from rouge_score import rouge_scorer
 nltk.download('punkt')
 nltk.download('wordnet')
 
+class Evaluation(object):
+
+    @staticmethod
+    def all_metrics(s1, s2):
+        s1_tokens = word_tokenize(s1.strip())
+        s2_tokens = word_tokenize(s2.strip())
+        cc = SmoothingFunction()
+        BLEUscore1 = nltk.translate.bleu_score.sentence_bleu([s1_tokens], s2_tokens, smoothing_function=cc.method5, weights=[(1.0)])
+        BLEUscore4 = nltk.translate.bleu_score.sentence_bleu([s1_tokens], s2_tokens, smoothing_function=cc.method5, weights=[(0.25,0.25,0.25,0.25)])
+        scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+        scores = scorer.score(s1,s2)
+        meteor_score = nltk.translate.meteor_score.meteor_score([s1_tokens], s2_tokens)
+
+        return {"Rouge_scores": [str(scores)],
+        "BlEU-1":[str(BLEUscore1)],
+        "BlEU-4":[str(BLEUscore4)],
+        "METEOR":[str(meteor_score)]}
+
 class WikiFunctions(object):
     """
     implements wikipedia based data loading methods
@@ -234,6 +252,19 @@ class Neural_Net:
         self.vectorize = vectorize
         self.vector_similarity = vector_similarity
 
+class Retr:
+
+    @staticmethod
+    def retrieve_context(text_splits,random_question,neural_net,top_k = 10):
+        """
+        retrieves top k context
+        """
+
+        query_vector = neural_net.vectorize(random_question); query_vectors = [query_vector for _ in range(len(text_splits))]
+        split_vectors = [neural_net.vectorize(split) for split in text_splits]
+        similarities = [neural_net.vector_similarity(x[0],x[1]).item() for x in zip(query_vectors,split_vectors)]
+        top_3_idxs = [similarities.index(y) for y in sorted(similarities)[::-1][:top_k]]
+        return '\n ===== \n'.join([text_splits[idx] for idx in top_3_idxs])
 
 class QA_RAG:
     """
@@ -241,7 +272,7 @@ class QA_RAG:
     """
 
     @staticmethod
-    def run_demo(PERFORM_AGENTIC_WORKFLOWS = False):
+    def run_demo(PERFORM_RESPONSE_CONTROLS = False):
         """
         executes random instance of QA_RAG on wiki article
         """
@@ -270,10 +301,10 @@ class QA_RAG:
 
             questions = None
 
-            if not PERFORM_AGENTIC_WORKFLOWS:
+            if not PERFORM_RESPONSE_CONTROLS:
                 questions = json.loads(quest_gen_agent.prompt_llm(quest_gen_prompt))
 
-            if PERFORM_AGENTIC_WORKFLOWS:
+            if PERFORM_RESPONSE_CONTROLS:
                 response = None
                 json_refiner_prompt = f"""
                      Make sure to provide your response in JSON Format as follows:
@@ -316,10 +347,10 @@ class QA_RAG:
 
             decompQs = None
 
-            if not PERFORM_AGENTIC_WORKFLOWS:
+            if not PERFORM_RESPONSE_CONTROLS:
                 decompQs = json.loads(qDecompAgent.prompt_llm(decomp_prompt))
 
-            if PERFORM_AGENTIC_WORKFLOWS:
+            if PERFORM_RESPONSE_CONTROLS:
                 response = None
                 json_refiner_prompt = f"""
 
@@ -369,11 +400,12 @@ class QA_RAG:
             gt_agent = Agents.get_JSON_response_agent()
             gt_agent_response, gt_response = None, None
 
-            if not PERFORM_AGENTIC_WORKFLOWS:
+            if not PERFORM_RESPONSE_CONTROLS:
                 gt_agent_response = json.loads(gt_agent.prompt_llm(gt_prompt))
                 gt_response = llm_response[list(gt_agent_response.keys())[0]]
 
-            if PERFORM_AGENTIC_WORKFLOWS:
+            if PERFORM_RESPONSE_CONTROLS:
+                gt_agent_response = None
                 json_refiner_prompt = response_json_example
                 refiner_agent = Agents.JSON_output_refiner_agent()
                 try:
@@ -386,6 +418,113 @@ class QA_RAG:
             print ('\n ------ GROUND TRUTH RESPONSE ------ \n')
             print (gt_response)
 
+            text_splits = Text_Preprocessor.text_splitter(article_text)
+            context = Retr.retrieve_context(text_splits,query,Neural_Net())
+
+            QAagent = Agents.get_JSON_response_agent()
+            qacomp_prompt = f"""
+
+                    Consider the following text
+
+                    ---- TEXT ----
+
+                    {context}
+
+                    Your task is to convert the context into a list of questions and answers by making sure to follow the instructions below:
+
+                    ---- INSTRUCTIONS ---
+                    1. Make sure to only include information that is explicitly mentioned in the context.
+                    2. Provide your response in JSON Format as follows:
+
+                        {{"Questions and Answers": ["question1, answer1", "question2, answer2", ...]}}
+
+            """
+
+            compQnAs = None
+
+            if not PERFORM_RESPONSE_CONTROLS:
+                compQnAs = json.loads(QAagent.prompt_llm(qacomp_prompt))
+
+            if PERFORM_RESPONSE_CONTROLS:
+                response = None
+                json_refiner_prompt = f"""
+
+                    Make sure to provide your response in JSON Format as follows:
+
+                    {{"Questions and Answers": ["question1, answer1", "question2, answer2", ...]}}
+                """
+
+                checker_agent = Agents.JSON_output_refiner_agent()
+
+                try:
+                    response = QAagent.prompt_llm(qacomp_prompt)
+                    compQnAs = json.loads(response)
+                except:
+                    compQnAs = checker_agent.refiner_function(response,qacomp_prompt,json_refiner_prompt)
+
+            compQnAs = compQnAs[list(compQnAs.keys())[0]]
+            print ('\n ----- CONTEXT ----- \n')
+            print (compQnAs)
+
+            responseAgent = Agents.get_JSON_response_agent()
+            response_prompt = f"""
+
+            Consider the following query and expanded query set. The expanded query set is provided to further clarify the query:
+
+            --- QUERY ----
+
+            {query}
+
+            --- EXPANDED QUERY SET ---
+
+            {str(decompQs)}:
+
+            Consider also the following relevant questions and answers that might help respond to the query:
+
+            --- RELEVANT QUESTIONS AND ANSWERS ----
+
+            {str(compQnAs)}
+
+            Your task is to respond to the query by making sure to follow the instructions below:
+
+            ---- INSTRUCTIONS ---
+            1. Respond only If the relevant questions and answers contain sufficient information to respond to the query.
+            2. If the relevant questions and answers do not contain sufficient information, respond with "I do not know".
+            3. Provide your response in JSON Format as follows:
+
+            {{"Response": "your response"}}
+
+            """
+
+            response = None
+            
+            if not PERFORM_RESPONSE_CONTROLS:
+                response = json.loads(responseAgent.prompt_llm(response_prompt))
+
+            if PERFORM_RESPONSE_CONTROLS:
+                intermediate_response = None
+                json_refiner_prompt = f"""
+
+                    Make sure to provide your response in JSON Format as follows:
+
+                    {{"Response": "your response"}}
+                """
+
+                checker_agent = Agents.JSON_output_refiner_agent()
+
+                try:
+                    intermediate_response = responseAagent.prompt_llm(response_prompt)
+                    response = json.loads(intermediate_response)
+                except:
+                    response = checker_agent.refiner_function(intermediate_response,response_prompt,json_refiner_prompt)
+
+            response = response[list(response.keys())[0]]
+            print ('\n ----- RESPONSE ----- \n')
+            print (response)
+
+            print ('\n ------ EVALUATION ------ \n')
+            metrics = Evaluation.all_metrics(gt_response,response)        
+            print (metrics) 
 
 if __name__ == '__main__':
-    QA_RAG.run_demo(PERFORM_AGENTIC_WORKFLOWS=True)
+    QA_RAG.run_demo(PERFORM_RESPONSE_CONTROLS=True)
