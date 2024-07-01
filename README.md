@@ -1,5 +1,10 @@
 # QA-RAG
 
+## Setup
+```
+pip install -r requirements.txt
+```
+
 ## Instructions to run QA-RAG
 1. Navigate to required Directory
 ```
